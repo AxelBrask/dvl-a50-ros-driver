@@ -57,16 +57,31 @@ class DVLDriver(object):
 			rospy.logerr("Coud not connect, retrying in 5 seconds...")
 			rospy.sleep(5)
 
-		rate = rospy.Rate(10) # 10hz
+		self.data_buffer = b""
 		while not rospy.is_shutdown():
-			if self.dvl_on:
-				self.receive_dvl()
-			rate.sleep()
+      
+			ready, _, _ = select.select([self.s], None, None)
+   
+			if self.s in ready:
+				data = self.s.recv(1024)
+				# if not data:
+				# 	inputs.remove(s)
+				# 	s.close()
+				# else:
+				data_buffer += data
+				while b'\n' in data_buffer:
+					line, data_buffer = data_buffer.split(b'\n', 1)
+					self.receive_dvl(data = line.decode('utf-8'))
+		
+      
+			# if self.dvl_on:
+			# 	self.receive_dvl()
+			# rate.sleep()
 
 		self.send_relay_msg(relay=False)
 		self.close()
    
-	def receive_dvl(self):
+	def receive_dvl(self, raw_data):
      
 		theDVL = DVL()
 		beam0 = DVLBeam()
@@ -74,7 +89,7 @@ class DVLDriver(object):
 		beam2 = DVLBeam()
 		beam3 = DVLBeam()
   
-		raw_data = self.getData()
+		# raw_data = self.getData()
 		data = json.loads(raw_data)
 
 		# edit: the logic in the original version can't actually publish the raw data
@@ -197,7 +212,8 @@ class DVLDriver(object):
 		"""	
 
 		self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self.s.settimeout(2)
+		self.s.settimeout(2.0)
+		self.s.setblocking(False)
 
 		rospy.loginfo("[DVL Driver] Trying to connect to DVL")
 		return_val = False
