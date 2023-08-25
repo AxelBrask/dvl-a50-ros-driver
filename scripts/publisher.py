@@ -20,6 +20,7 @@ import socket
 import json
 from time import sleep
 import select
+import threading
 
 class DVLDriver(object):
     
@@ -51,35 +52,43 @@ class DVLDriver(object):
 		self.switch_srv = rospy.Service(self.dvl_ctrl_srv, SetBool, self.dvl_switch_cb) 
 		self.dvl_pub = rospy.Publisher(self.dvl_topic, DVL, queue_size=10)
 		self.switch = False
+
+		self.data_buffer = b""
   
 		# Connect to the DVL and turn it off
 		while not self.connect():
 			rospy.logerr("Coud not connect, retrying in 5 seconds...")
 			rospy.sleep(5)
 
-		self.data_buffer = b""
+		socket_thread = threading.Thread(target=self.handle_socket, args=(self.s,))
+		socket_thread.start()
+	
+		rate = rospy.Rate(10) # 10hz
 		while not rospy.is_shutdown():
-      
-			ready, _, _ = select.select([self.s], None, None)
-   
-			if self.s in ready:
-				data = self.s.recv(1024)
-				# if not data:
-				# 	inputs.remove(s)
-				# 	s.close()
-				# else:
-				data_buffer += data
-				while b'\n' in data_buffer:
-					line, data_buffer = data_buffer.split(b'\n', 1)
-					self.receive_dvl(data = line.decode('utf-8'))
-		
-      
-			# if self.dvl_on:
-			# 	self.receive_dvl()
-			# rate.sleep()
+			rate.sleep()
 
 		self.send_relay_msg(relay=False)
 		self.close()
+	
+	def handle_socket(self,sock):
+		while True:
+			try:
+				data = sock.recv(1024)
+				if not data:  # If data is empty, the remote end has closed the socket
+					# sock.close()
+					break
+				self.data_buffer += data
+				while b'\n' in self.data_buffer:
+					line, self.data_buffer = self.data_buffer.split(b'\n', 1)
+					self.receive_dvl(line.decode('utf-8'))
+			except socket.timeout as err:
+				rospy.logerr("No data received? {}".format(err))
+			except socket.error as err:
+				self.connect()
+				sock = self.s
+				rospy.sleep(2)
+
+
    
 	def receive_dvl(self, raw_data):
      
@@ -196,12 +205,6 @@ class DVLDriver(object):
 
 		res.success = True
 		res.message = "Relay message has been sent"
-  
-		if switch_msg.data:
-			while not self.connect():
-				rospy.logerr("Coud not connect, retrying in 5 seconds...")
-				rospy.sleep(5)
-			rospy.loginfo("Connected to DVL")
 
 		return res 
         
@@ -212,8 +215,7 @@ class DVLDriver(object):
 		"""	
 
 		self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self.s.settimeout(2.0)
-		self.s.setblocking(False)
+		self.s.settimeout(1.0)
 
 		rospy.loginfo("[DVL Driver] Trying to connect to DVL")
 		return_val = False
