@@ -20,6 +20,7 @@ import socket
 import json
 from time import sleep
 import select
+import threading
 
 class DVLDriver(object):
     
@@ -43,9 +44,6 @@ class DVLDriver(object):
 		self.s = None
 		self.dvl_on = False
 		self.oldJson = ""
-
-		self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		self.s.settimeout(1)
   
   		# Topics for debugging
 		self.dvl_en_pub = rospy.Publisher('dvl_enable', Bool, queue_size=10)
@@ -54,22 +52,45 @@ class DVLDriver(object):
 		self.switch_srv = rospy.Service(self.dvl_ctrl_srv, SetBool, self.dvl_switch_cb) 
 		self.dvl_pub = rospy.Publisher(self.dvl_topic, DVL, queue_size=10)
 		self.switch = False
+
+		self.data_buffer = b""
   
 		# Connect to the DVL and turn it off
-		rospy.loginfo("[DVL Driver] Turning off DVL")
-		if self.connect():
-			self.set_config(acoustic_enabled="n")
-  
+		while not self.connect():
+			rospy.logerr("Coud not connect, retrying in 5 seconds...")
+			rospy.sleep(5)
+
+		socket_thread = threading.Thread(target=self.handle_socket, args=(self.s,))
+		socket_thread.start()
+	
 		rate = rospy.Rate(10) # 10hz
 		while not rospy.is_shutdown():
-			if self.dvl_on:
-				self.receive_dvl()
 			rate.sleep()
 
 		self.send_relay_msg(relay=False)
 		self.close()
+	
+	def handle_socket(self,sock):
+		while True:
+			try:
+				data = sock.recv(1024)
+				if not data:  # If data is empty, the remote end has closed the socket
+					# sock.close()
+					break
+				self.data_buffer += data
+				while b'\n' in self.data_buffer:
+					line, self.data_buffer = self.data_buffer.split(b'\n', 1)
+					self.receive_dvl(line.decode('utf-8'))
+			except socket.timeout as err:
+				rospy.logerr("No data received? {}".format(err))
+			except socket.error as err:
+				self.connect()
+				sock = self.s
+				rospy.sleep(2)
+
+
    
-	def receive_dvl(self):
+	def receive_dvl(self, raw_data):
      
 		theDVL = DVL()
 		beam0 = DVLBeam()
@@ -77,7 +98,7 @@ class DVLDriver(object):
 		beam2 = DVLBeam()
 		beam3 = DVLBeam()
   
-		raw_data = self.getData()
+		# raw_data = self.getData()
 		data = json.loads(raw_data)
 
 		# edit: the logic in the original version can't actually publish the raw data
@@ -172,13 +193,14 @@ class DVLDriver(object):
 		self.switch = True
 
 		res = SetBoolResponse()
+		self.dvl_on = switch_msg.data		
   
 		if switch_msg.data:
 			self.send_relay_msg(relay=True)
 		else:
 			self.send_relay_msg(relay=False)
+			self.close()
 
-		self.dvl_on = switch_msg.data		
 		self.dvl_en_pub.publish(Bool(self.dvl_on))
 
 		res.success = True
@@ -187,10 +209,13 @@ class DVLDriver(object):
 		return res 
         
 
-	def connect(self, force = False) -> bool:
+	def connect(self) -> bool:
 		"""
 		Connect to the DVL
 		"""	
+
+		self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		self.s.settimeout(1.0)
 
 		rospy.loginfo("[DVL Driver] Trying to connect to DVL")
 		return_val = False
@@ -201,8 +226,6 @@ class DVLDriver(object):
 			rospy.loginfo("[DVL Driver] Successfully connected")
 		except socket.error as err:
 			rospy.logerr("No route to host, DVL might be booting? {}".format(err))
-			rospy.sleep(2)
-			self.connect()
 
 		return return_val
 	
@@ -236,10 +259,12 @@ class DVLDriver(object):
 				if len(rec) == 0:
 					rospy.logerr("Socket closed by the DVL, reopening")
 					self.connect()
+					# return
 					continue
 			except socket.timeout as err:
 				rospy.logerr("Lost connection with the DVL, reinitiating the connection: {}".format(err))
 				self.connect()
+				# return
 				continue
 			raw_data = raw_data + rec
 		raw_data = raw_data.decode("utf-8") 
