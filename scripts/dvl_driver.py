@@ -78,12 +78,6 @@ class DVLDriver(object):
 
         self.data_buffer = b""
 
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_address = self.s.getsockname()
-        # self.s.settimeout(None)
-
-        rospy.loginfo("[DVL Driver] socket created %s", self.server_address)
-
         self.timeout = 1.
         self.connected = False
         try:
@@ -103,6 +97,7 @@ class DVLDriver(object):
         finally:
             self.send_relay_msg(relay=False)
             self.close()
+            rospy.sleep(1.)
             rospy.loginfo("DVL driver off")
 
 
@@ -268,12 +263,12 @@ class DVLDriver(object):
 
         if switch_msg.data:
             self.send_relay_msg(relay=True)
-            rospy.sleep(5.)
+            rospy.sleep(30.)
             self.connected = self.connect()
         else:
             self.connected = False
-            self.close()
             self.send_relay_msg(relay=False)
+            self.close()
 
         res.success = self.connected
         return res
@@ -282,7 +277,7 @@ class DVLDriver(object):
     def send_relay_msg(self, relay):
 
         if relay:
-            rospy.loginfo(f"[DVL Driver] Powering on")
+            rospy.loginfo(f"[DVL Driver] Powering on. This will take 30 sec")
         else:
             rospy.loginfo(f"[DVL Driver] Powering off")
 
@@ -296,9 +291,14 @@ class DVLDriver(object):
         Connect to the DVL
         """
         try:
+            
+            self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_address = self.s.getsockname()
+            rospy.loginfo("[DVL Driver] socket created %s", self.server_address)
             self.s.connect((self.TCP_IP, self.TCP_PORT))
             connected = True
             rospy.loginfo("[DVL Driver] Successfully connected")
+
         except socket.error as err:
             rospy.logerr("[DVL Driver] Could not connect, DVL might be booting? {}".format(err))
             connected = False
