@@ -214,14 +214,14 @@ class DVLDriver(object):
         # do_log_raw_data is true: only fill in theDVL using velocity data and publish to dvl/data topic
 
         if self.do_log_raw_data:
-            rospy.loginfo(raw_data)
+            # rospy.loginfo(raw_data)
             self.pub_raw.publish(raw_data)
-            if data["type"] != "velocity":
-                return
-        else:
-            if data["type"] != "velocity":
-                return
-            self.pub_raw.publish(raw_data)
+        #     if data["type"] != "velocity":
+        #         return
+        # else:
+        #     if data["type"] != "velocity":
+        #         return
+        #     self.pub_raw.publish(raw_data)
 
         theDVL.header.stamp = rospy.Time.now()
         theDVL.header.frame_id = self.dvl_frame
