@@ -1,0 +1,11 @@
+<launch>
+<arg name="robot_name" default="sam" />
+<group>
+        <node pkg="dvl_driver" exec="dvl_driver" name="dvl_driver"  output="screen" namespace="$(var robot_name)">
+            <param name="robot_name" value="$(var robot_name)" />
+            <param name="ip" value="192.168.2.95" />
+            <param name="port" value="16171" />
+            <param name="log_raw_data" value="false" />
+        </node>
+    </group>
+</launch>

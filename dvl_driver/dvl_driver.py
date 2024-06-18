@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-import rospy
+import rclpy
+from rclpy.node import Node
 
 # from waterlinked_a50_ros_driver.msg import DVL as waterlinkedDVLmsg
 # from waterlinked_a50_ros_driver.msg import DVLBeam as waterlinkedDVLbeamMsg
 
 from std_srvs.srv import SetBool
-from std_srvs.srv import SetBoolResponse
-from std_srvs.srv import SetBoolRequest
+
 
 from std_msgs.msg import String
 from std_msgs.msg import Float64
@@ -18,13 +18,17 @@ from smarc_msgs.msg import DVL
 
 import socket
 import json
-from time import sleep
+import time
 import select
 import traceback
 import selectors
 import threading
 from time import monotonic as time
 import os
+#Topics
+from sam_msgs.msg import Links as SamLinks
+from smarc_msgs.msg import Topics as SmarcTopics
+from sam_msgs.msg import Topics as SamTopics
 
 __all__ = ["BaseServer", "TCPServer", "UDPServer",
            "ThreadingUDPServer", "ThreadingTCPServer",
@@ -45,23 +49,25 @@ else:
     _ServerSelector = selectors.SelectSelector
 
 
-class DVLDriver(object):
+class DVLDriver(Node):
+    
 
-    def __init__(self):
-
-        self.dvl_frame = rospy.get_param('~dvl_frame', 'sam/dvl_link')
-        self.dvl_topic = rospy.get_param('~dvl_topic', '/sam/core/dvl')
-        self.dvl_ctrl_srv = rospy.get_param('~dvl_on_off_srv', 'core/toggle_dvl')
-        self.dvl_raw_topic = rospy.get_param('~dvl_raw_topic', 'dvl_raw_output')
-        self.relay_topic = rospy.get_param('~relay_topic', 'sam/core/dvl_relay')
-
-        self.pub_raw = rospy.Publisher( self.dvl_raw_topic, String, queue_size=10)
-        self.pub_relay = rospy.Publisher( self.relay_topic, Bool, queue_size=10)
+    def __init__(self,namespace = None):
+        super().__init__("DVL_driver", namespace=namespace)
+        self.declare_parameter("robot_name", "sam")
+        self.declare_parameter("ip", "192.168.2.95")
+        self.declare_parameter("port", 16171)
+        self.declare_parameter("log_raw_data", False)
+        self.robot_name = self.get_parameter("robot_name").value
+        self.dvl_frame = f"{self.robot_name}_{SamLinks.DVL_LINK}"
+        
+        self.pub_raw = self.create_publisher( String,SamTopics.DVL_RAW_TOPIC,qos_profile=10 )
+        self.pub_relay = self.create_publisher( Bool,SamTopics.DVL_RELAY_TOPIC,qos_profile=10)
 
         # Waterlinked parameters
-        self.TCP_IP = rospy.get_param("~ip", "192.168.2.95")
-        self.TCP_PORT = rospy.get_param("~port", 16171)
-        self.do_log_raw_data = rospy.get_param("~do_log_raw_data", False)
+        self.TCP_IP = self.get_parameter("ip").value
+        self.TCP_PORT = self.get_parameter("port").value
+        self.do_log_raw_data = self.get_parameter("log_raw_data").value
 
         # Waterlinked variables
         self.s = None
@@ -69,11 +75,11 @@ class DVLDriver(object):
         self.oldJson = ""
 
         # Topics for debugging
-        self.dvl_en_pub = rospy.Publisher('dvl_enable', Bool, queue_size=10)
+        self.dvl_en_pub = self.create_publisher(Bool,'dvl_enable',  qos_profile=10)
 
         # Service to start/stop DVL and DVL data publisher
-        self.switch_srv = rospy.Service(self.dvl_ctrl_srv, SetBool, self.dvl_switch_cb)
-        self.dvl_pub = rospy.Publisher(self.dvl_topic, DVL, queue_size=10)
+        self.switch_srv = self.create_service(SetBool,SamTopics.DVL_ON_OFF_SERVICE,  self.dvl_switch_cb)
+        self.dvl_pub = self.create_publisher(DVL,SamTopics.DVL_TOPIC,  qos_profile=10)
         # self.switch = False
 
         self.data_buffer = b""
@@ -81,7 +87,7 @@ class DVLDriver(object):
         self.timeout = 1.
         self.connected = False
         try:
-            while not rospy.is_shutdown():
+            while rclpy.ok():
                 if self.connected:
                     rlist, _, _ = select.select([self.s], [], [], self.timeout)
                     if self.s in rlist:
@@ -89,16 +95,17 @@ class DVLDriver(object):
                         if dvl_msg is not None:
                             self.receive_dvl(dvl_msg)
                 else:
-                    rospy.loginfo_throttle(10, "DVL is off")
+                    # rospy.loginfo_throttle(10, "DVL is off")
+                    self.get_logger().info("DVL is off")
 
         except Exception:
-            rospy.logerr(traceback.format_exc())
+            self.get_logger().error(traceback.format_exc())
 
         finally:
             self.send_relay_msg(relay=False)
             self.close()
-            rospy.sleep(1.)
-            rospy.loginfo("DVL driver off")
+            rclpy.sleep(1.)
+            self.get_logger().info("DVL driver off")
 
 
     def handle_socket_select(self):
@@ -145,13 +152,13 @@ class DVLDriver(object):
             try:
                 rec = self.s.recv(1)
                 if len(rec) == 0:
-                    rospy.logerr("rec == 0 received")
+                    self.get_logger().error("rec == 0 received")
                     continue
 
                 raw_data = raw_data + rec
             
             except IOError as err:
-                rospy.logerr("[DVL Driver] Damping last DVL msg: {}".format(err))
+                self.get_logger().error("[DVL Driver] Damping last DVL msg: {}".format(err))
                 return None
 
         if self.connected:
@@ -204,8 +211,6 @@ class DVLDriver(object):
         beam1 = DVLBeam()
         beam2 = DVLBeam()
         beam3 = DVLBeam()
-
-        # raw_data = self.getData()
         data = json.loads(raw_data)
 
         # edit: the logic in the original version can't actually publish the raw data
@@ -214,16 +219,9 @@ class DVLDriver(object):
         # do_log_raw_data is true: only fill in theDVL using velocity data and publish to dvl/data topic
 
         if self.do_log_raw_data:
-            # rospy.loginfo(raw_data)
             self.pub_raw.publish(raw_data)
-        #     if data["type"] != "velocity":
-        #         return
-        # else:
-        #     if data["type"] != "velocity":
-        #         return
-        #     self.pub_raw.publish(raw_data)
 
-        theDVL.header.stamp = rospy.Time.now()
+        theDVL.header.stamp = self.get_clock().now().to_msg()
         theDVL.header.frame_id = self.dvl_frame
 
         theDVL.velocity.x = data["vx"]
@@ -251,35 +249,34 @@ class DVLDriver(object):
         theDVL.beams = [beam0, beam1, beam2, beam3]
 
         if data['velocity_valid']:
-            #rospy.loginfo(f"[DVL Driver] Valid measurement : {data['velocity_valid']}")
             self.dvl_pub.publish(theDVL)
 
 
-    def dvl_switch_cb(self, switch_msg : SetBoolRequest):
+    def dvl_switch_cb(self, request : SetBool,response: SetBool):
 
         # self.switch = True
         # rospy.loginfo(f"[DVL Driver] DVL request received : {switch_msg.data}")
-        res = SetBoolResponse()
 
-        if switch_msg.data:
+
+        if request.data:
             self.send_relay_msg(relay=True)
-            rospy.sleep(30.)
+            rclpy.sleep(30.)
             self.connected = self.connect()
         else:
             self.connected = False
             self.send_relay_msg(relay=False)
             self.close()
 
-        res.success = self.connected
-        return res
+        response.success = self.connected
+        return response
 
 
     def send_relay_msg(self, relay):
 
         if relay:
-            rospy.loginfo(f"[DVL Driver] Powering on. This will take 30 sec")
+            self.get_logger().info(f"[DVL Driver] Powering on. This will take 30 sec")
         else:
-            rospy.loginfo(f"[DVL Driver] Powering off")
+            self.get_logger().info(f"[DVL Driver] Powering off")
 
         relay_msg = Bool()
         relay_msg.data = relay
@@ -294,13 +291,13 @@ class DVLDriver(object):
             
             self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_address = self.s.getsockname()
-            rospy.loginfo("[DVL Driver] socket created %s", self.server_address)
+            self.get_logger().info("[DVL Driver] socket created %s", self.server_address)
             self.s.connect((self.TCP_IP, self.TCP_PORT))
             connected = True
-            rospy.loginfo("[DVL Driver] Successfully connected")
+            self.get_logger().info("[DVL Driver] Successfully connected")
 
         except socket.error as err:
-            rospy.logerr("[DVL Driver] Could not connect, DVL might be booting? {}".format(err))
+            self.get_logger().error("[DVL Driver] Could not connect, DVL might be booting? {}".format(err))
             connected = False
 
         return connected
@@ -313,36 +310,12 @@ class DVLDriver(object):
 
         try:
             self.s.close()
-            rospy.loginfo("[DVL Driver] Successfully disconnected")
+            self.get_logger().info("[DVL Driver] Successfully disconnected")
             return True
         except Exception as e:
-            rospy.logerr("[DVL Driver] Could not disconnect, DVL might be booting? {}".format(e))
+            self.get_logger().error("[DVL Driver] Could not disconnect, DVL might be booting? {}".format(e))
             return False
 
-    # def getData(self):
-    #     raw_data = b''
-
-    #     while not b'\n' in raw_data:
-    #         try:
-    #             rec = self.s.recv(1) # Add timeout for that
-    #             if len(rec) == 0:
-    #                 rospy.logerr("Socket closed by the DVL, reopening")
-    #                 self.connect()
-    #                 # return
-    #                 continue
-    #         except socket.timeout as err:
-    #             rospy.logerr("Lost connection with the DVL, reinitiating the connection: {}".format(err))
-    #             self.connect()
-    #             # return
-    #             continue
-    #         raw_data = raw_data + rec
-    #     raw_data = raw_data.decode("utf-8")
-    #     raw_data = self.oldJson + raw_data
-    #     self.oldJson = ''
-    #     raw_data = raw_data.split('\n')
-    #     self.oldJson = raw_data[1]
-    #     raw_data = raw_data[0]
-    #     return raw_data
 
 
     def set_config(self,
@@ -361,19 +334,19 @@ class DVLDriver(object):
         # Validate input
         valid_input = True
         if speed_of_sound is not None and (speed_of_sound < 0 ):
-            rospy.logerr("Invalid speed of sound")
+            self.get_logger().error("Invalid speed of sound")
             valid_input = False
         if mounting_rotation_offset is not None and (mounting_rotation_offset < 0 or mounting_rotation_offset > 360):
-            rospy.logerr("Invalid mounting rotation offset")
+            self.get_logger().error("Invalid mounting rotation offset")
             valid_input = False
         if acoustic_enabled is not None and (acoustic_enabled != "y" and acoustic_enabled != "n"):
-            rospy.logerr("Invalid acoustic enabled value")
+            self.get_logger().error("Invalid acoustic enabled value")
             valid_input = False
         if dark_mode_enabled is not None and (dark_mode_enabled != "y" and dark_mode_enabled != "n"):
-            rospy.logerr("Invalid dark mode enabled value")
+            self.get_logger().error("Invalid dark mode enabled value")
             valid_input = False
         if range_mode is not None and (range_mode != "auto"):
-            rospy.logerr("Invalid range mode")
+            self.get_logger().error("Invalid range mode")
             valid_input = False
 
         if not valid_input:
@@ -388,14 +361,19 @@ class DVLDriver(object):
 
         command_string += "\n"
 
-        rospy.loginfo("[DVL Driver] Sending command: {}".format(command_string))
+        self.get_logger().info("[DVL Driver] Sending command: {}".format(command_string))
         self.s.send(command_string.encode())
+
+def main(args=None,namespace = None):
+    rclpy.init(args=args)
+    
+    dvl_drive = DVLDriver(namespace)
+    dvl_drive.get_logger().info  ('[DVL Driver] Starting DVL driver')
+    try:
+        DVLDriver()
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == '__main__':
-    rospy.init_node('DVLDriver')
-    rospy.loginfo('[DVL Driver] Starting DVL driver')
-    try:
-        DVLDriver()
-    except rospy.ROSInterruptException:
-        pass
+    main()
