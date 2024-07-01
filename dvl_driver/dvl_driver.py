@@ -8,7 +8,6 @@ from rclpy.node import Node
 
 from std_srvs.srv import SetBool
 
-
 from std_msgs.msg import String
 from std_msgs.msg import Float64
 from std_msgs.msg import Bool
@@ -22,13 +21,13 @@ import time
 import select
 import traceback
 import selectors
-import threading
 from time import monotonic as time
 import os
 #Topics
 from sam_msgs.msg import Links as SamLinks
 from smarc_msgs.msg import Topics as SmarcTopics
 from sam_msgs.msg import Topics as SamTopics
+
 
 __all__ = ["BaseServer", "TCPServer", "UDPServer",
            "ThreadingUDPServer", "ThreadingTCPServer",
@@ -95,8 +94,7 @@ class DVLDriver(Node):
                         if dvl_msg is not None:
                             self.receive_dvl(dvl_msg)
                 else:
-                    # rospy.loginfo_throttle(10, "DVL is off")
-                    self.get_logger().info("DVL is off")
+                    self.get_logger().info("DVL is off", throttle_duration_sec=10)
 
         except Exception:
             self.get_logger().error(traceback.format_exc())
@@ -104,7 +102,7 @@ class DVLDriver(Node):
         finally:
             self.send_relay_msg(relay=False)
             self.close()
-            rclpy.sleep(1.)
+            time.sleep(1.)
             self.get_logger().info("DVL driver off")
 
 
@@ -253,16 +251,19 @@ class DVLDriver(Node):
 
 
     def dvl_switch_cb(self, request : SetBool,response: SetBool):
-
+        self.get_logger().info ('[DVL Driver] DVL request received : %s',request.data)
         # self.switch = True
         # rospy.loginfo(f"[DVL Driver] DVL request received : {switch_msg.data}")
 
 
         if request.data:
+            self.get_logger().info("[DVL Driver] DVL request received : True")
             self.send_relay_msg(relay=True)
-            rclpy.sleep(30.)
+            time.sleep(30.)
+            self.get_logger().info("[DVL Driver] DVL powered on")
             self.connected = self.connect()
         else:
+            self.get_logger().info("[DVL Driver] DVL request received : False")
             self.connected = False
             self.send_relay_msg(relay=False)
             self.close()
@@ -367,10 +368,10 @@ class DVLDriver(Node):
 def main(args=None,namespace = None):
     rclpy.init(args=args)
     
-    dvl_drive = DVLDriver(namespace)
-    dvl_drive.get_logger().info  ('[DVL Driver] Starting DVL driver')
     try:
-        DVLDriver()
+        dvl_drive = DVLDriver(namespace)
+        dvl_drive.get_logger().info  ('[DVL Driver] Starting DVL driver')
+
     except KeyboardInterrupt:
         pass
 
