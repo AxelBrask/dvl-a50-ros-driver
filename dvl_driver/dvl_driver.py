@@ -21,7 +21,6 @@ import time
 import select
 import traceback
 import selectors
-from time import monotonic as time
 import os
 #Topics
 from sam_msgs.msg import Links as SamLinks
@@ -85,26 +84,25 @@ class DVLDriver(Node):
 
         self.timeout = 1.
         self.connected = False
+
+        #used a timer instead of a while loop to stop the node from blocking
+        self.timer = self.create_timer(0.1, self.timer_callback)
+
+
+    def timer_callback(self):
         try:
-            while rclpy.ok():
-                if self.connected:
-                    rlist, _, _ = select.select([self.s], [], [], self.timeout)
-                    if self.s in rlist:
-                        dvl_msg = self.handle_socket_select()
-                        if dvl_msg is not None:
-                            self.receive_dvl(dvl_msg)
-                else:
-                    self.get_logger().info("DVL is off", throttle_duration_sec=10)
-
-        except Exception:
-            self.get_logger().error(traceback.format_exc())
-
-        finally:
-            self.send_relay_msg(relay=False)
-            self.close()
-            time.sleep(1.)
-            self.get_logger().info("DVL driver off")
-
+            if self.connected and self.s is not None:
+                # Check if the socket is readable
+                rlist, _, _ = select.select([self.s], [], [], self.timeout)
+                if self.s in rlist:
+                    dvl_msg = self.handle_socket_select()
+                    if dvl_msg is not None:
+                        self.receive_dvl(dvl_msg)
+            else:
+                # Only log once every 10 seconds to avoid spamming the logs
+                self.get_logger().info(f"DVL is off", throttle_duration_sec=10)
+        except Exception as e:
+            self.get_logger().error(f"Exception in timer_callback: {traceback.format_exc()}")
 
     def handle_socket_select(self):
         """Handle one request, possibly blocking.
@@ -125,22 +123,6 @@ class DVLDriver(Node):
 
         return self.extract_data()
 
-        # Wait until a request arrives or the timeout expires - the loop is
-        # necessary to accommodate early wakeups due to EINTR.
-
-        #with _ServerSelector() as selector:
-        #       selector.register(self, selectors.EVENT_READ)
-
-        #while True:
-        #        ready = selector.select(timeout)
-        #        if ready:
-        #                return self.extract_data()
-        #        else:
-        #                if timeout is not None:
-        #                        timeout = deadline - time()
-        #                        if timeout < 0:
-        #                                rospy.logwarn("Socket timeout")
-        #                                return
 
 
     def extract_data(self):
@@ -156,7 +138,8 @@ class DVLDriver(Node):
                 raw_data = raw_data + rec
             
             except IOError as err:
-                self.get_logger().error("[DVL Driver] Damping last DVL msg: {}".format(err))
+                error_message = "[DVL Driver] Error reading from socket: {}".format(err)
+                self.get_logger().error(error_message)
                 return None
 
         if self.connected:
@@ -173,32 +156,6 @@ class DVLDriver(Node):
 
             return None
 
-        # data = self.s.recv(1024)
-        # if data:  # If data is empty, the remote end has closed the socket
-        #       self.data_buffer += data
-        #       while b'\n' in self.data_buffer:
-        #               line, self.data_buffer = self.data_buffer.split(b'\n', 1)
-        #               self.receive_dvl(line.decode('utf-8'))
-
-
-
-    # def handle_socket(self,sock):
-    #       while True:
-    #               try:
-    #                       data = sock.recv(1024)
-    #                       if not data:  # If data is empty, the remote end has closed the socket
-    #                               # sock.close()
-    #                               break
-    #                       self.data_buffer += data
-    #                       while b'\n' in self.data_buffer:
-    #                               line, self.data_buffer = self.data_buffer.split(b'\n', 1)
-    #                               self.receive_dvl(line.decode('utf-8'))
-    #               except socket.timeout as err:
-    #                       rospy.logerr("No data received? {}".format(err))
-    #               except socket.error as err:
-    #                       self.connect()
-    #                       sock = self.s
-    #                       rospy.sleep(2)
 
 
 
@@ -250,26 +207,26 @@ class DVLDriver(Node):
             self.dvl_pub.publish(theDVL)
 
 
-    def dvl_switch_cb(self, request : SetBool,response: SetBool):
-        self.get_logger().info ('[DVL Driver] DVL request received : %s',request.data)
+    def dvl_switch_cb(self, request: SetBool, response: SetBool):
+        self.get_logger().info(f'[DVL Driver] DVL request received: {request.data}')
         # self.switch = True
         # rospy.loginfo(f"[DVL Driver] DVL request received : {switch_msg.data}")
 
-
         if request.data:
-            self.get_logger().info("[DVL Driver] DVL request received : True")
+            self.get_logger().info("[DVL Driver] DVL request received: True")
             self.send_relay_msg(relay=True)
-            time.sleep(30.)
+            time.sleep(30.0)
             self.get_logger().info("[DVL Driver] DVL powered on")
             self.connected = self.connect()
         else:
-            self.get_logger().info("[DVL Driver] DVL request received : False")
+            self.get_logger().info("[DVL Driver] DVL request received: False")
             self.connected = False
             self.send_relay_msg(relay=False)
             self.close()
 
         response.success = self.connected
         return response
+
 
 
     def send_relay_msg(self, relay):
@@ -292,13 +249,14 @@ class DVLDriver(Node):
             
             self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_address = self.s.getsockname()
-            self.get_logger().info("[DVL Driver] socket created %s", self.server_address)
+            self.get_logger().info(f"[DVL Driver] socket created {self.server_address}")
             self.s.connect((self.TCP_IP, self.TCP_PORT))
             connected = True
             self.get_logger().info("[DVL Driver] Successfully connected")
 
         except socket.error as err:
-            self.get_logger().error("[DVL Driver] Could not connect, DVL might be booting? {}".format(err))
+            error_message = "[DVL Driver] Could not connect, DVL might be booting? {}".format(err)
+            self.get_logger().error(error_message)
             connected = False
 
         return connected
@@ -314,7 +272,8 @@ class DVLDriver(Node):
             self.get_logger().info("[DVL Driver] Successfully disconnected")
             return True
         except Exception as e:
-            self.get_logger().error("[DVL Driver] Could not disconnect, DVL might be booting? {}".format(e))
+            error_message = "[DVL Driver] Could not disconnect, DVL might be booting? {}".format(e)
+            self.get_logger().error(error_message)
             return False
 
 
@@ -361,8 +320,8 @@ class DVLDriver(Node):
             command_string+= str(val) if val is not None else ""
 
         command_string += "\n"
-
-        self.get_logger().info("[DVL Driver] Sending command: {}".format(command_string))
+        info_message = "[DVL Driver] Sending command: {}".format(command_string)
+        self.get_logger().info(info_message)
         self.s.send(command_string.encode())
 
 def main(args=None,namespace = None):
@@ -371,6 +330,7 @@ def main(args=None,namespace = None):
     try:
         dvl_drive = DVLDriver(namespace)
         dvl_drive.get_logger().info  ('[DVL Driver] Starting DVL driver')
+        rclpy.spin(dvl_drive)
 
     except KeyboardInterrupt:
         pass
